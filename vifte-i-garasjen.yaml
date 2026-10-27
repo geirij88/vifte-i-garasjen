@@ -1,0 +1,573 @@
+# ==========================================
+# VIFTE I GARASJEN
+# ESP32 + 2 SHT40 + vifte + lys
+# Rekonstruert versjon – ikke OTA-validert
+# ==========================================
+
+esphome:
+  name: vifte-i-garasjen
+  friendly_name: Vifte-i-Garasjen
+  on_boot:
+    priority: 600
+    then:
+      - output.turn_on: status_led_output
+
+esp32:
+  variant: esp32
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password:!secret wifi_password
+  reboot_timeout: 0s
+  ap:
+    ssid: Vifte-i-Garasje Fallback Hotspot
+    password:!secret fallback_ap_password
+
+captive_portal:
+
+# ==========================================
+# INTERNE DRIFTSVERDIER
+# ==========================================
+
+globals:
+  - id: vifte_start_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  - id: lys_start_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  - id: garasje_sist_mottatt_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  - id: kanal_sist_mottatt_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
+  - id: garasje_mottatt
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: kanal_mottatt
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: ventilasjon_status
+    type: std::string
+    restore_value: false
+    initial_value: '"Starter"'
+
+# ==========================================
+# RELEER
+# ==========================================
+
+switch:
+  - platform: gpio
+    name: "Garasjevifte"
+    id: garasjevifte
+    pin:
+      number: GPIO16
+      inverted: false
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lambda: |-
+          id(vifte_start_ms) = millis();
+
+  - platform: gpio
+    name: "Garasjelys"
+    id: garasjelys
+    pin:
+      number: GPIO17
+      inverted: false
+    restore_mode: ALWAYS_OFF
+    on_turn_on:
+      - lambda: |-
+          id(lys_start_ms) = millis();
+
+# ==========================================
+# DRIFTSMODUS OG SENSORVALG
+# ==========================================
+
+select:
+  - platform: template
+    name: "Vifte driftsmodus"
+    id: vifte_driftsmodus
+    icon: mdi:fan-auto
+    optimistic: true
+    restore_value: true
+    initial_option: "Manuell"
+    options:
+      - "Manuell"
+      - "Automatisk"
+
+  - platform: template
+    name: "Vifte styrende sensor"
+    id: vifte_styrende_sensor
+    icon: mdi:water-percent
+    optimistic: true
+    restore_value: true
+    initial_option: "Garasje"
+    options:
+      - "Garasje"
+      - "Kanal"
+
+# ==========================================
+# JUSTERBARE GRENSEVERDIER
+# ==========================================
+
+number:
+  - platform: template
+    name: "Vifte startgrense"
+    id: vifte_startgrense
+    icon: mdi:water-plus
+    unit_of_measurement: "%"
+    mode: slider
+    min_value: 31
+    max_value: 90
+    step: 1
+    initial_value: 65
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (
+              !std::isnan(id(vifte_stoppgrense).state) &&
+              x <= id(vifte_stoppgrense).state
+            ) {
+              auto call = id(vifte_stoppgrense).make_call();
+              call.set_value(x - 1.0f);
+              call.perform();
+            }
+
+  - platform: template
+    name: "Vifte stoppgrense"
+    id: vifte_stoppgrense
+    icon: mdi:water-minus
+    unit_of_measurement: "%"
+    mode: slider
+    min_value: 30
+    max_value: 89
+    step: 1
+    initial_value: 55
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (
+              !std::isnan(id(vifte_startgrense).state) &&
+              x >= id(vifte_startgrense).state
+            ) {
+              auto call = id(vifte_startgrense).make_call();
+              call.set_value(x + 1.0f);
+              call.perform();
+            }
+
+  - platform: template
+    name: "Vifte minimum driftstid"
+    id: vifte_minimum_driftstid
+    icon: mdi:timer-outline
+    unit_of_measurement: "min"
+    mode: slider
+    min_value: 0
+    max_value: 60
+    step: 1
+    initial_value: 5
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    name: "Lys avslaging etter"
+    id: lys_avslaging_etter
+    icon: mdi:lightbulb-clock-outline
+    unit_of_measurement: "min"
+    mode: slider
+    min_value: 0
+    max_value: 240
+    step: 1
+    initial_value: 10
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            if (id(garasjelys).state) {
+              id(lys_start_ms) = millis();
+            }
+
+# ==========================================
+# I2C
+# SEPARATE BUSSER FOR BEGGE SENSORER
+# ==========================================
+
+i2c:
+  - id: i2c_garasje
+    sda: GPIO21
+    scl: GPIO22
+    scan: true
+
+  - id: i2c_kanal
+    sda: GPIO25
+    scl: GPIO26
+    scan: true
+
+# ==========================================
+# SHT40-SENSORER
+# ==========================================
+
+sensor:
+  # SHT40-01 – GARASJE
+  - platform: sht4x
+    i2c_id: i2c_garasje
+    address: 0x44
+
+    temperature:
+      name: "SHT40-01 Temperatur"
+      id: garasje_temperatur
+
+    humidity:
+      name: "SHT40-01 Luftfuktighet"
+      id: garasje_fuktighet
+      on_value:
+        then:
+          - lambda: |-
+              id(garasje_sist_mottatt_ms) = millis();
+              id(garasje_mottatt) = true;
+
+    update_interval: 30s
+
+  # SHT40-02 – KANAL
+  - platform: sht4x
+    i2c_id: i2c_kanal
+    address: 0x44
+
+    temperature:
+      name: "SHT40-02 Temperatur"
+      id: kanal_temperatur
+
+    humidity:
+      name: "SHT40-02 Luftfuktighet"
+      id: kanal_fuktighet
+      on_value:
+        then:
+          - lambda: |-
+              id(kanal_sist_mottatt_ms) = millis();
+              id(kanal_mottatt) = true;
+
+    update_interval: 30s
+
+  # ========================================
+  # STYRENDE LUFTFUKTIGHET
+  # 100-110 % aksepteres og vises som 100 %
+  # Råverdier på sensorene beholdes
+  # ========================================
+
+  - platform: template
+    name: "Vifte styrende luftfuktighet"
+    id: vifte_styrende_luftfuktighet
+    icon: mdi:water-percent
+    unit_of_measurement: "%"
+    device_class: humidity
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: 5s
+
+    lambda: |-
+      const bool kanal =
+        id(vifte_styrende_sensor).current_option() == "Kanal";
+
+      const bool mottatt = kanal
+        ? id(kanal_mottatt)
+        : id(garasje_mottatt);
+
+      const uint32_t sist = kanal
+        ? id(kanal_sist_mottatt_ms)
+        : id(garasje_sist_mottatt_ms);
+
+      const float fukt = kanal
+        ? id(kanal_fuktighet).state
+        : id(garasje_fuktighet).state;
+
+      if (
+        !mottatt ||
+        (uint32_t)(millis() - sist) > 120000UL ||
+        !std::isfinite(fukt) ||
+        fukt < 0.0f ||
+        fukt > 110.0f
+      ) {
+        return NAN;
+      }
+
+      return fukt > 100.0f ? 100.0f : fukt;
+
+  # ========================================
+  # LYSETS NEDTELLING
+  # ========================================
+
+  - platform: template
+    name: "Lys gjenstaende tid"
+    id: lys_gjenstaende_tid
+    icon: mdi:timer-sand
+    unit_of_measurement: "min"
+    accuracy_decimals: 1
+    update_interval: 5s
+
+    lambda: |-
+      const float minutter =
+        id(lys_avslaging_etter).state;
+
+      if (
+        !id(garasjelys).state ||
+        !std::isfinite(minutter) ||
+        minutter <= 0.0f
+      ) {
+        return 0.0f;
+      }
+
+      const float brukt =
+        (uint32_t)(millis() - id(lys_start_ms)) / 60000.0f;
+
+      const float igjen = minutter - brukt;
+
+      return igjen > 0.0f ? igjen : 0.0f;
+
+# ==========================================
+# TEKSTSENSORER
+# ==========================================
+
+text_sensor:
+  - platform: template
+    name: "SHT40-01 Serienummer"
+    entity_category: diagnostic
+    lambda: |-
+      return {"094bc823"};
+    update_interval: 30s
+
+  - platform: template
+    name: "SHT40-02 Serienummer"
+    entity_category: diagnostic
+    lambda: |-
+      return {"094bc82b"};
+    update_interval: 30s
+
+  - platform: template
+    name: "Vifte styringsstatus"
+    id: vifte_styringsstatus
+    icon: mdi:information-outline
+    lambda: |-
+      return id(ventilasjon_status);
+    update_interval: 5s
+
+# ==========================================
+# LOKAL AUTOMATIKK
+# KJØRES HVERT SEKUND
+# ==========================================
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          const uint32_t naa = millis();
+
+          // Sjekk lystimer
+          const float lys_min =
+            id(lys_avslaging_etter).state;
+
+          if (
+            id(garasjelys).state &&
+            std::isfinite(lys_min) &&
+            lys_min > 0.0f
+          ) {
+            const uint32_t lys_varighet =
+              (uint32_t)(lys_min * 60000.0f);
+
+            if (
+              (uint32_t)(naa - id(lys_start_ms)) >= lys_varighet
+            ) {
+              id(garasjelys).turn_off();
+            }
+          }
+
+          // Manuell viftedrift
+          if (
+            id(vifte_driftsmodus).current_option()
+            != "Automatisk"
+          ) {
+            id(ventilasjon_status) =
+              id(garasjevifte).state
+              ? "Manuell - vifte pa"
+              : "Manuell - vifte av";
+            return;
+          }
+
+          // Velg styrende sensor
+          const bool kanal =
+            id(vifte_styrende_sensor).current_option()
+            == "Kanal";
+
+          const bool mottatt = kanal
+            ? id(kanal_mottatt)
+            : id(garasje_mottatt);
+
+          const uint32_t sist = kanal
+            ? id(kanal_sist_mottatt_ms)
+            : id(garasje_sist_mottatt_ms);
+
+          const float fukt = kanal
+            ? id(kanal_fuktighet).state
+            : id(garasje_fuktighet).state;
+
+          // Failsafe ved sensorfeil
+          // Beholder eksisterende viftestatus
+          if (
+            !mottatt ||
+            (uint32_t)(naa - sist) > 120000UL ||
+            !std::isfinite(fukt) ||
+            fukt < 0.0f ||
+            fukt > 110.0f
+          ) {
+            id(ventilasjon_status) =
+              "Automatisk - sensorfeil, behold viftestatus";
+            return;
+          }
+
+          // Kontroller grenser
+          const float start =
+            id(vifte_startgrense).state;
+
+          const float stopp =
+            id(vifte_stoppgrense).state;
+
+          const float min_tid =
+            id(vifte_minimum_driftstid).state;
+
+          if (
+            !std::isfinite(start) ||
+            !std::isfinite(stopp) ||
+            !std::isfinite(min_tid) ||
+            stopp >= start
+          ) {
+            id(ventilasjon_status) =
+              "Automatisk - ugyldige grenser, behold viftestatus";
+            return;
+          }
+
+          // Begrens styringsverdi til 100 %
+          const float styr_fukt =
+            fukt > 100.0f ? 100.0f : fukt;
+
+          // Start vifte
+          if (!id(garasjevifte).state) {
+            if (styr_fukt >= start) {
+              id(garasjevifte).turn_on();
+              id(ventilasjon_status) =
+                "Automatisk - vifte startet";
+            } else {
+              id(ventilasjon_status) =
+                "Automatisk - venter pa startgrense";
+            }
+            return;
+          }
+
+          // Minimum driftstid
+          const uint32_t minimum_ms =
+            (uint32_t)(min_tid * 60000.0f);
+
+          const uint32_t kjort_ms =
+            (uint32_t)(naa - id(vifte_start_ms));
+
+          if (kjort_ms < minimum_ms) {
+            id(ventilasjon_status) =
+              "Automatisk - minimum driftstid";
+            return;
+          }
+
+          // Stopp vifte
+          if (styr_fukt <= stopp) {
+            id(garasjevifte).turn_off();
+            id(ventilasjon_status) =
+              "Automatisk - stoppgrense nadd";
+          } else {
+            id(ventilasjon_status) =
+              "Automatisk - vifte i drift";
+          }
+
+# ==========================================
+# STATUS-LED
+# ==========================================
+
+output:
+  - platform: gpio
+    pin: GPIO23
+    id: status_led_output
+
+
+# ==========================================
+# SHT40-01 – VEDLIKEHOLD
+# Påvirker bare garasjesensoren
+# ==========================================
+
+button:
+  - platform: template
+    name: "Reset SHT40-01"
+    id: sht40_01_reset_button
+    icon: mdi:restart
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          const uint8_t cmd = 0x94;
+          auto result = id(i2c_garasje).write(0x44, &cmd, 1);
+          if (result == esphome::i2c::NO_ERROR) {
+            ESP_LOGI("sht40", "SHT40-01 reset sent");
+          } else {
+            ESP_LOGW("sht40", "SHT40-01 reset failed: %d", result);
+          }
+
+  - platform: template
+    name: "Tork SHT40-01"
+    id: sht40_01_heater_button
+    icon: mdi:heat-wave
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          static uint32_t last_heat = 0;
+          static bool heated = false;
+          const uint32_t now = millis();
+
+          if (heated && uint32_t(now - last_heat) < 600000UL) {
+            ESP_LOGW("sht40", "Heater cooldown active");
+            return;
+          }
+
+          // Low power, short heater pulse (~100 ms)
+          const uint8_t cmd = 0x15;
+          auto result = id(i2c_garasje).write(0x44, &cmd, 1);
+
+          if (result == esphome::i2c::NO_ERROR) {
+            last_heat = now;
+            heated = true;
+            ESP_LOGI("sht40", "SHT40-01 heater pulse sent");
+          } else {
+            ESP_LOGW("sht40", "SHT40-01 heater failed: %d", result);
+          }
