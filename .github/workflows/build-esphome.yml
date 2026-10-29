@@ -53,6 +53,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vifte-i-garasjen-firmware
-          path: .esphome/build/vifte-i-garasjen/build/firmware.bin
+          path: .esphome/build/**/firmware*.bin
           if-no-files-found: error
           retention-days: 14
