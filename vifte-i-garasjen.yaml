@@ -554,10 +554,10 @@ script:
     then:
       - lambda: |-
           id(sht40_01_test_aktiv) = true;
-          ESP_LOGI("sht40_test", "Starter test med tre varmepulser");
+          ESP_LOGI("sht40_test", "Starter test med ti varmepulser");
 
       - repeat:
-          count: 3
+          count: 10
           then:
             - lambda: |-
                 const uint8_t cmd = 0x39;
@@ -568,7 +568,7 @@ script:
                 } else {
                   ESP_LOGW("sht40_test", "Kunne ikke starte varmepuls");
                 }
-            - delay: 2min
+            - delay: 9s
 
       - lambda: |-
           id(sht40_01_test_aktiv) = false;
