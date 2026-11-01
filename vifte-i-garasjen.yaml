@@ -42,6 +42,16 @@ captive_portal:
 # ==========================================
 
 globals:
+  - id: sht40_01_test_aktiv
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+  - id: sht40_01_varme_til_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+
   - id: vifte_start_ms
     type: uint32_t
     restore_value: false
@@ -309,6 +319,10 @@ sensor:
         ? id(kanal_fuktighet).state
         : id(garasje_fuktighet).state;
 
+      if (!kanal && id(sht40_01_test_aktiv)) {
+        return NAN;
+      }
+
       if (
         !mottatt ||
         (uint32_t)(millis() - sist) > 120000UL ||
@@ -438,6 +452,12 @@ interval:
             ? id(kanal_fuktighet).state
             : id(garasje_fuktighet).state;
 
+          if (!kanal && id(sht40_01_test_aktiv)) {
+            id(ventilasjon_status) =
+              "Automatisk - sensortest, behold viftestatus";
+            return;
+          }
+
           // Failsafe ved sensorfeil
           // Beholder eksisterende viftestatus
           if (
@@ -528,7 +548,45 @@ output:
 # Påvirker bare garasjesensoren
 # ==========================================
 
+script:
+  - id: sht40_01_test_sekvens
+    mode: single
+    then:
+      - lambda: |-
+          id(sht40_01_test_aktiv) = true;
+          ESP_LOGI("sht40_test", "Starter test med tre varmepulser");
+
+      - repeat:
+          count: 3
+          then:
+            - lambda: |-
+                const uint8_t cmd = 0x39;
+                auto result = id(i2c_garasje).write(0x44, &cmd, 1);
+                if (result == esphome::i2c::NO_ERROR) {
+                  id(sht40_01_varme_til_ms) = millis() + 20000UL;
+                  ESP_LOGI("sht40_test", "Varmepuls sendt");
+                } else {
+                  ESP_LOGW("sht40_test", "Kunne ikke starte varmepuls");
+                }
+            - delay: 2min
+
+      - lambda: |-
+          id(sht40_01_test_aktiv) = false;
+          ESP_LOGI("sht40_test", "Test ferdig");
+
 button:
+  - platform: template
+    name: "SHT40-01 Test torking"
+    id: sht40_01_test_torking
+    icon: mdi:heat-wave
+    entity_category: diagnostic
+    on_press:
+      - if:
+          condition:
+            lambda: 'return !id(sht40_01_test_aktiv);'
+          then:
+            - script.execute: sht40_01_test_sekvens
+
   - platform: template
     name: "Reset SHT40-01"
     id: sht40_01_reset_button
