@@ -603,6 +603,14 @@ script:
           id(sht40_02_test_aktiv) = false;
           ESP_LOGI("sht40_test", "Test ferdig");
 
+  - id: sht40_begge_test_sekvens
+    mode: single
+    then:
+      - script.execute: sht40_01_test_sekvens
+      - script.wait: sht40_01_test_sekvens
+      - script.execute: sht40_02_test_sekvens
+      - script.wait: sht40_02_test_sekvens
+
 button:
   - platform: template
     name: "SHT40-01 Test torking"
@@ -644,29 +652,13 @@ button:
           }
 
   - platform: template
-    name: "Tork SHT40-01"
-    id: sht40_01_heater_button
+    name: "Tork begge SHT40"
+    id: sht40_begge_test_button
     icon: mdi:heat-wave
     entity_category: diagnostic
     on_press:
-      - lambda: |-
-          static uint32_t last_heat = 0;
-          static bool heated = false;
-          const uint32_t now = millis();
-
-          if (heated && uint32_t(now - last_heat) < 600000UL) {
-            ESP_LOGW("sht40", "Heater cooldown active");
-            return;
-          }
-
-          // Low power, short heater pulse (~100 ms)
-          const uint8_t cmd = 0x15;
-          auto result = id(i2c_garasje).write(0x44, &cmd, 1);
-
-          if (result == esphome::i2c::NO_ERROR) {
-            last_heat = now;
-            heated = true;
-            ESP_LOGI("sht40", "SHT40-01 heater pulse sent");
-          } else {
-            ESP_LOGW("sht40", "SHT40-01 heater failed: %d", result);
-          }
+      - if:
+          condition:
+            lambda: 'return !id(sht40_01_test_aktiv) && !id(sht40_02_test_aktiv);'
+          then:
+            - script.execute: sht40_begge_test_sekvens
